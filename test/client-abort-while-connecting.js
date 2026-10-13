@@ -403,3 +403,63 @@ test('Pool close ignores cancelled slots while a valid request finishes', { time
   await closing
   assert.strictEqual(callbacks, 1)
 })
+
+for (const reason of [false, 0, '']) {
+  test(`connector settles cancellation with falsy reason ${JSON.stringify(reason)}`, async (t) => {
+    const socket = new net.Socket()
+    t.after(() => socket.destroy())
+    t.mock.method(net, 'connect', () => socket)
+    const controller = new AbortController()
+    let callbacks = 0
+    const outcome = new Promise((resolve) => {
+      buildConnector({ timeout: 0 })({
+        hostname: 'localhost', protocol: 'http:', signal: controller.signal
+      }, (err) => { callbacks++; resolve(err) })
+    })
+    controller.abort(reason)
+    const timeout = Symbol('timeout')
+    const result = await Promise.race([outcome, delay(500, timeout)])
+    assert.ok(result instanceof errors.RequestAbortedError)
+    assert.strictEqual(result.cause, reason)
+    assert.strictEqual(callbacks, 1)
+  })
+}
+
+test('connector settles an abort when its socket is already closing', async (t) => {
+  const socket = new net.Socket()
+  t.after(() => socket.destroy())
+  t.mock.method(net, 'connect', () => socket)
+  const controller = new AbortController()
+  const reason = new Error('abort a closing connector socket')
+  const outcome = new Promise((resolve) => {
+    buildConnector({ timeout: 0 })({
+      hostname: 'localhost', protocol: 'http:', signal: controller.signal
+    }, (err) => resolve(err))
+  })
+  socket.destroy()
+  controller.abort(reason)
+  const timeout = Symbol('timeout')
+  assert.strictEqual(await Promise.race([outcome, delay(500, timeout)]), reason)
+})
+
+test('connector close settles once and removes its abort listener', async (t) => {
+  const { getEventListeners } = require('node:events')
+  const socket = new net.Socket()
+  t.after(() => socket.destroy())
+  t.mock.method(net, 'connect', () => socket)
+  const controller = new AbortController()
+  let callbacks = 0
+  const outcome = new Promise((resolve) => {
+    buildConnector({ timeout: 0 })({
+      hostname: 'localhost', protocol: 'http:', signal: controller.signal
+    }, (err) => { callbacks++; resolve(err) })
+  })
+  assert.strictEqual(getEventListeners(controller.signal, 'abort').length, 1)
+  socket.destroy()
+  const timeout = Symbol('timeout')
+  const result = await Promise.race([outcome, delay(500, timeout)])
+  assert.ok(result instanceof errors.SocketError)
+  assert.strictEqual(getEventListeners(controller.signal, 'abort').length, 0)
+  controller.abort(new Error('late abort'))
+  assert.strictEqual(callbacks, 1)
+})
